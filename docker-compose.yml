@@ -1,0 +1,30 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports: ["6379:6379"]
+    volumes: [redis-data:/data]
+
+  backend:
+    build: { context: ., target: backend }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      CACHE_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      BACKEND_HOST: 0.0.0.0
+    depends_on: [redis]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./versions:/app/versions
+    ports: ["8000:8000"]
+
+  frontend:
+    build: { context: ., target: frontend }
+    restart: unless-stopped
+    depends_on: [backend]
+    ports: ["5173:80"]
+
+volumes:
+  redis-data:

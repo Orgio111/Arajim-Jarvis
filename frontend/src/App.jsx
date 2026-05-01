@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api, streamChat } from './api.js';
 import { useWebSocket } from './useWebSocket.js';
+import { VoiceController } from './voice.js';
 
 const MODES = [
   { id: 'full_auto',    label: 'AUTO' },
@@ -29,6 +30,16 @@ export default function App() {
   const [lastIntent, setLastIntent] = useState(null);
 
   const chatRef = useRef(null);
+  const voiceRef = useRef(null);
+
+  useEffect(() => {
+    voiceRef.current = new VoiceController({
+      sessionId: 'default',
+      onTranscript: (t) => t && setChat((c) => [...c, { role: 'user', content: `🎙 ${t}` }]),
+      onReply: (r) => r && setChat((c) => [...c, { role: 'assistant', content: r }]),
+      onError: (e) => setChat((c) => [...c, { role: 'system', content: `Voice error: ${e.message}` }]),
+    });
+  }, []);
 
   useEffect(() => { refreshAll(); const t = setInterval(refreshTelemetry, 5000); return () => clearInterval(t); }, []);
   useEffect(() => {
@@ -106,7 +117,13 @@ export default function App() {
   async function approve(id) { await api.approve(id); refreshPending(); }
   async function deny(id)    { await api.deny(id);    refreshPending(); }
   async function forget(id)  { await api.deleteMemory(id); refreshMemories(); }
-  async function toggleVoice() { setVoice((await api.voiceToggle()).active ? { ...voice, active: true } : { ...voice, active: false }); }
+  async function toggleVoice() {
+    const next = !voice.active;
+    setVoice({ ...voice, active: next });
+    try { await api.voiceToggle(next); } catch {}
+    if (next) await voiceRef.current?.start();
+    else      voiceRef.current?.stop();
+  }
 
   async function triggerUpgrade() {
     const phrase = window.prompt(`Type the confirmation phrase to upgrade myself:`, '');

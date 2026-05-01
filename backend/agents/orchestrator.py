@@ -58,6 +58,22 @@ class Orchestrator:
 
     # =============================================================== entry
     async def handle(self, *, session_id: str, user_message: str) -> dict[str, Any]:
+        """Top-level entry. Watchdog: never raises — failures are surfaced as
+        chat replies and published to the event bus so the UI sees them."""
+        try:
+            return await self._handle_inner(session_id, user_message)
+        except Exception as exc:
+            logger.exception("orchestrator.handle crashed; auto-recovery active")
+            await bus.publish("error", {"type": "orchestrator", "message": str(exc)})
+            reply = f"⚠ Orchestrator error: {exc}. The system has recovered and is ready for the next request."
+            try:
+                await get_store().append_chat(session_id, "assistant", reply,
+                                              metadata={"error": str(exc)})
+            except Exception:
+                pass
+            return {"reply": reply, "error": str(exc), "ok": False}
+
+    async def _handle_inner(self, session_id: str, user_message: str) -> dict[str, Any]:
         store = get_store()
         await store.append_chat(session_id, "user", user_message)
         await bus.publish("chat", {"type": "user", "session_id": session_id,
@@ -66,6 +82,11 @@ class Orchestrator:
         # 0) memory triggers
         early = await self._handle_memory_triggers(session_id, user_message)
         if early is not None:
+            # Memory state changed — drop cached replies that may now be stale
+            try:
+                await cache.invalidate(CACHE_NS)
+            except Exception as exc:
+                logger.debug(f"cache invalidate after memory change failed: {exc}")
             return early
 
         t0 = time.perf_counter()

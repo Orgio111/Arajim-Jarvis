@@ -4,9 +4,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from backend.auth import auth_dependency
 
 from backend.agents.collaboration import collaboration
 from backend.agents.orchestrator import orchestrator
@@ -28,7 +30,7 @@ from backend.upgrade.manager import UpgradeError, upgrade_manager
 from backend.vector.store import get_vector_store
 from backend.voice.pipeline import voice as voice_pipeline
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(auth_dependency)])
 
 
 # ----------------------------------------------------------------- chat
@@ -225,8 +227,29 @@ async def voice_transcribe(audio: UploadFile = File(...), language: str = Form(d
 
 @router.post("/voice/speak")
 async def voice_speak(item: dict[str, str]):
+    """Synthesize and return audio bytes (audio/mpeg)."""
     audio = await voice_pipeline.synth(item.get("text", ""), voice=item.get("voice"))
-    return {"bytes": len(audio)}
+    from fastapi.responses import Response
+    return Response(content=audio, media_type="audio/mpeg",
+                    headers={"X-Audio-Bytes": str(len(audio))})
+
+
+@router.post("/voice/converse")
+async def voice_converse(audio: UploadFile = File(...),
+                          session_id: str = Form(default="voice"),
+                          language: str = Form(default="")):
+    """Full loop: mic audio in → JARVIS reply audio out."""
+    data = await audio.read()
+    result = await voice_pipeline.handle_audio(data, session_id=session_id)
+    from fastapi.responses import Response
+    return Response(
+        content=result["audio"],
+        media_type="audio/mpeg",
+        headers={
+            "X-Transcript": result["text"][:512],
+            "X-Reply": result["reply"][:512],
+        },
+    )
 
 
 @router.post("/voice/toggle")
@@ -242,6 +265,73 @@ async def voice_state():
         "active": voice_pipeline.active,
         "lang": settings.voice_lang,
     }
+
+
+# ------------------------------------------------ NVIDIA parallel + merge
+class RaceReq(BaseModel):
+    prompt: str
+    models: list[str] | None = None
+    max_tokens: int = 1024
+
+
+@router.post("/models/race")
+async def models_race(req: RaceReq):
+    """Send the same prompt to N models concurrently, return whichever wins."""
+    client = get_client()
+    models = req.models or [m for m in MODEL_REGISTRY][:3]
+    msgs = [{"role": "user", "content": req.prompt}]
+    winner = await client.race(models=models, messages=msgs, max_tokens=req.max_tokens)
+    return {"answer": winner.choices[0].message.content,
+            "models_raced": models}
+
+
+class MergeReq(BaseModel):
+    prompt: str
+    models: list[str] | None = None
+    max_tokens: int = 1024
+
+
+@router.post("/models/merge_best")
+async def models_merge_best(req: MergeReq):
+    """Run prompt across N models in parallel, pick highest-quality reply.
+
+    Quality is judged by a fast NIM reviewer model so we still leverage
+    the brief's best-result merging without a learned scorer.
+    """
+    import asyncio
+    client = get_client()
+    models = req.models or [m for m in MODEL_REGISTRY][:3]
+    msgs = [{"role": "user", "content": req.prompt}]
+    answers = await asyncio.gather(
+        *(client.chat(model=m, messages=msgs, max_tokens=req.max_tokens) for m in models),
+        return_exceptions=True,
+    )
+    candidates = []
+    for m, a in zip(models, answers):
+        if isinstance(a, Exception):
+            continue
+        candidates.append({"model": m, "text": a.choices[0].message.content})
+    if not candidates:
+        raise HTTPException(502, "all models failed")
+
+    # Reviewer picks the best
+    judge_prompt = (
+        "You will pick the strongest answer to the user's question.\n"
+        f"Question: {req.prompt}\n\nCandidates:\n"
+        + "\n\n".join(f"[{i+1}] ({c['model']})\n{c['text']}" for i, c in enumerate(candidates))
+        + "\n\nReply with ONLY the integer of the best candidate."
+    )
+    judge = await client.chat(
+        model=model_router.pick_for("reviewer", prefer_quality=True),
+        messages=[{"role": "user", "content": judge_prompt}],
+        max_tokens=8, temperature=0.0,
+    )
+    pick_text = (judge.choices[0].message.content or "1").strip()
+    import re
+    m = re.search(r"\d+", pick_text)
+    idx = (int(m.group(0)) - 1) if m else 0
+    idx = max(0, min(idx, len(candidates) - 1))
+    return {"winner": candidates[idx], "candidates": candidates}
 
 
 # ----------------------------------------------------------------- intent

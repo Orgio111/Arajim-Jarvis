@@ -7,10 +7,23 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-source .venv/bin/activate
+# venv layout differs between Windows (Scripts/) and POSIX (bin/).
+if [ -f ".venv/Scripts/activate" ]; then
+  VENV_ACTIVATE=".venv/Scripts/activate"
+  VENV_PY=".venv/Scripts/python.exe"
+elif [ -f ".venv/bin/activate" ]; then
+  VENV_ACTIVATE=".venv/bin/activate"
+  VENV_PY=".venv/bin/python"
+else
+  echo "ERROR: .venv not found. Run scripts/install.sh first." >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "${VENV_ACTIVATE}"
 
 # Start backend (background)
-( python -m backend.main ) &
+( "${VENV_PY}" -m backend.main ) &
 BACK_PID=$!
 echo "Backend pid=$BACK_PID"
 

@@ -1,22 +1,31 @@
 """REST endpoints."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from backend.agents.collaboration import collaboration
 from backend.agents.orchestrator import orchestrator
+from backend.cache.manager import cache
 from backend.config import settings
 from backend.core.modes import Mode, controller as mode_ctrl
+from backend.intelligence.intent import predict_intent
+from backend.learning.passive import learner
 from backend.memory.store import get_store
 from backend.nvidia.benchmark import benchmark_all
 from backend.nvidia.client import get_client
 from backend.nvidia.models import MODEL_REGISTRY
 from backend.nvidia.router import router as model_router
+from backend.search.deep import deep_search
+from backend.search.web import web_search
 from backend.skills.registry import registry as skill_registry
 from backend.system.permissions import permissions
 from backend.upgrade.manager import UpgradeError, upgrade_manager
+from backend.vector.store import get_vector_store
 from backend.voice.pipeline import voice as voice_pipeline
 
 router = APIRouter()
@@ -39,6 +48,26 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
         except UpgradeError as exc:
             raise HTTPException(400, str(exc))
     return await orchestrator.handle(session_id=req.session_id, user_message=req.message)
+
+
+@router.post("/chat/stream")
+async def chat_stream(req: ChatRequest) -> StreamingResponse:
+    """Server-Sent Events: token-by-token streaming for chat intents."""
+
+    async def gen():
+        try:
+            async for chunk in orchestrator.handle_stream(
+                session_id=req.session_id, user_message=req.message
+            ):
+                yield f"data: {json.dumps(chunk, default=str)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'event': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ----------------------------------------------------------------- memory
@@ -212,6 +241,97 @@ async def voice_state():
         "enabled": voice_pipeline.enabled,
         "active": voice_pipeline.active,
         "lang": settings.voice_lang,
+    }
+
+
+# ----------------------------------------------------------------- intent
+@router.post("/intent")
+async def intent(item: dict[str, str]):
+    res = await predict_intent(item.get("message", ""))
+    return res.__dict__
+
+
+# ----------------------------------------------------------------- search
+class SearchReq(BaseModel):
+    query: str
+    k: int = 6
+
+
+@router.post("/search/web")
+async def web_search_route(req: SearchReq):
+    rs = await web_search(req.query, k=req.k)
+    return {"results": [{"title": r.title, "url": r.url, "snippet": r.snippet,
+                          "source": r.source} for r in rs]}
+
+
+class DeepSearchReq(BaseModel):
+    question: str
+    max_steps: int | None = None
+
+
+@router.post("/search/deep")
+async def deep_search_route(req: DeepSearchReq):
+    r = await deep_search(req.question, max_steps=req.max_steps)
+    return {
+        "answer": r.answer,
+        "citations": r.citations,
+        "steps": r.steps,
+        "elapsed_s": r.elapsed_s,
+    }
+
+
+# ----------------------------------------------------------------- cache
+@router.get("/cache/stats")
+async def cache_stats():
+    return cache.stats
+
+
+@router.post("/cache/invalidate")
+async def cache_invalidate(item: dict[str, str]):
+    await cache.invalidate(item.get("namespace", "chat-reply"))
+    return {"ok": True}
+
+
+# ----------------------------------------------------------- vector memory
+@router.get("/vector/size")
+async def vector_size():
+    return {"size": get_vector_store().size}
+
+
+class VectorSearch(BaseModel):
+    query: str
+    k: int = 6
+    threshold: float = 0.0
+
+
+@router.post("/vector/search")
+async def vector_search(req: VectorSearch):
+    return {"hits": await get_vector_store().search(req.query, k=req.k,
+                                                     threshold=req.threshold)}
+
+
+# ----------------------------------------------------------------- learning
+@router.get("/learning")
+async def learning():
+    return learner.snapshot()
+
+
+# --------------------------------------------------------------- debate API
+class DebateReq(BaseModel):
+    task: str
+    language: str = "python"
+    max_rounds: int = 3
+
+
+@router.post("/agents/debate")
+async def debate(req: DebateReq):
+    r = await collaboration.debate(req.task, language=req.language,
+                                    max_rounds=req.max_rounds)
+    return {
+        "final": r.final,
+        "rounds": [{"n": rd.n, "score": rd.score, "review": rd.review}
+                   for rd in r.rounds],
+        "elapsed_s": r.elapsed_s,
     }
 
 

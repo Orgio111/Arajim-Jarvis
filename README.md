@@ -6,13 +6,17 @@ A production-grade, NVIDIA NIM-powered autonomous AI operating system. JARVIS-le
 
 Arajim-Jarvis is a continuously running AI environment that:
 
-- **Thinks** — multi-agent reasoning across Planner / Executor / Coder / Reviewer / Optimizer
+- **Thinks** — multi-agent reasoning across Planner / Executor / Coder / Reviewer / Optimizer, with debate loops for high-stakes tasks
+- **Streams** — token-by-token responses via SSE for instant perceived latency
+- **Caches** — exact + semantic (embedding-based) cache for sub-second repeats
+- **Searches** — real-time web + deep multi-step research with cited answers
 - **Acts** — executes terminal commands, controls files, runs apps, performs real OS-level work
-- **Learns** — persistent memory, chat history, skill registry that grows over time
+- **Remembers** — SQLite persistent memory, vector store with auto-linking, auto-summarized chat history
+- **Learns** — passive learner adjusts model router + skill weights from outcomes
 - **Upgrades itself** — only when the user explicitly says `upgrade myself` (versioned, reversible)
 - **Speaks** — voice activation, Mongolian + English STT/TTS
 
-NVIDIA NIM is the **only** LLM backend. Every model call routes through the dynamic NIM router which picks the best model per task (reasoning, coding, fast classification).
+NVIDIA NIM is the **only** LLM backend. Every model call routes through the dynamic NIM router which picks the best model per task (reasoning, coding, fast classification, long-context, embeddings).
 
 ## Quick Start
 
@@ -30,7 +34,7 @@ cp .env.example .env
 
 Open http://localhost:5173 for the dashboard. Backend runs on http://localhost:8000.
 
-See `docs/SETUP.md` for full setup, `docs/ARCHITECTURE.md` for design, and `docs/UPGRADE_SYSTEM.md` for the self-improvement mechanism.
+See `docs/SETUP.md` for full setup, `docs/ARCHITECTURE.md` for design, `docs/UPGRADE_SYSTEM.md` for the self-improvement mechanism, and `docs/ADVANCED.md` for streaming, caching, vector memory, deep search, and auto-learning.
 
 ## Modes
 

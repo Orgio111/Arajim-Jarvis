@@ -19,6 +19,7 @@ from typing import Any
 import aiosqlite
 
 from backend.config import settings
+from backend.core.events import bus
 from backend.core.logger import logger
 
 REMEMBER_RE = re.compile(r"^\s*remember (?:this[:\s]+)?(.+)$", re.IGNORECASE)
@@ -80,7 +81,29 @@ class MemoryStore:
                 (content, ",".join(tags or []), source, time.time()),
             )
             await db.commit()
-            return cur.lastrowid or 0
+            mid = cur.lastrowid or 0
+        # Mirror into the vector store and surface related items
+        try:
+            from backend.vector.store import get_vector_store
+            vid = await get_vector_store().add(
+                content, metadata={"memory_id": mid, "tags": tags or [], "source": source}
+            )
+            related = await get_vector_store().find_related(vid, k=4)
+            if related:
+                logger.info(f"Memory #{mid} linked to {[r['id'] for r in related]}")
+        except Exception as exc:
+            logger.warning(f"vector mirror failed for memory #{mid}: {exc}")
+        return mid
+
+    async def semantic_recall(self, query: str, *, k: int = 5,
+                               threshold: float = 0.5) -> list[dict[str, Any]]:
+        """Embedding-based recall across all memories."""
+        try:
+            from backend.vector.store import get_vector_store
+            return await get_vector_store().search(query, k=k, threshold=threshold)
+        except Exception as exc:
+            logger.warning(f"semantic recall failed: {exc}")
+            return await self.search_memories(query, limit=k)
 
     async def forget(self, memory_id: int) -> bool:
         await self.init()

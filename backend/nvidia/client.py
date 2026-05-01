@@ -168,6 +168,34 @@ class NIMClient:
             logger.warning(f"Could not list NIM models: {exc}")
             return []
 
+    async def discover_and_register(self) -> list[str]:
+        """Pull live /v1/models and merge into the curated registry."""
+        from backend.nvidia.models import MODEL_REGISTRY, ModelInfo, ModelTier
+        ids = await self.list_models()
+        added = []
+        for mid in ids:
+            if mid in MODEL_REGISTRY:
+                continue
+            tier = ModelTier.GENERAL
+            lower = mid.lower()
+            if "code" in lower or "deepseek" in lower or "qwen" in lower:
+                tier = ModelTier.CODE
+            elif "nano" in lower or "mini" in lower or "small" in lower or "8b" in lower:
+                tier = ModelTier.FAST
+            elif "kimi" in lower or "long" in lower or "1m" in lower or "2m" in lower:
+                tier = ModelTier.LONG_CONTEXT
+            elif "ultra" in lower or "405" in lower or "ultra" in lower or "reasoning" in lower:
+                tier = ModelTier.REASONING
+            MODEL_REGISTRY[mid] = ModelInfo(
+                id=mid, tier=tier, context_window=128_000,
+                strengths=("auto-discovered",),
+                notes="Discovered live from /v1/models.",
+            )
+            added.append(mid)
+        if added:
+            logger.info(f"Discovered {len(added)} new NIM models: {added[:5]}...")
+        return added
+
     # ---------------------------------------------------------------- stats
     @property
     def stats(self) -> dict[str, dict[str, float]]:

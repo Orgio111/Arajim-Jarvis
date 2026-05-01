@@ -24,6 +24,12 @@ async def lifespan(app: FastAPI):
     logger.info("Booting Arajim-Jarvis backend")
     await get_store().init()
     init_v1_if_missing()
+    if settings.nim_auto_discover and settings.nvidia_api_key:
+        try:
+            from backend.nvidia.client import get_client
+            asyncio.create_task(get_client().discover_and_register())
+        except Exception as exc:
+            logger.warning(f"NIM auto-discovery skipped: {exc}")
     asyncio.create_task(_heartbeat())
     yield
     logger.info("Shutting down")

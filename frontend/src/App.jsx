@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { api } from './api.js';
+import { api, streamChat } from './api.js';
 import { useWebSocket } from './useWebSocket.js';
 
 const MODES = [
@@ -17,15 +17,20 @@ export default function App() {
   const [chat, setChat] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [streaming, setStreaming] = useState(true);
   const [memories, setMemories] = useState([]);
   const [pending, setPending] = useState([]);
   const [versions, setVersions] = useState([]);
   const [voice, setVoice] = useState({ enabled: false, active: false, lang: 'en' });
   const [models, setModels] = useState({ registry: {}, scores: {} });
+  const [cacheStats, setCacheStats] = useState({});
+  const [learning, setLearning] = useState({});
+  const [vectorSize, setVectorSize] = useState(0);
+  const [lastIntent, setLastIntent] = useState(null);
 
   const chatRef = useRef(null);
 
-  useEffect(() => { refreshAll(); }, []);
+  useEffect(() => { refreshAll(); const t = setInterval(refreshTelemetry, 5000); return () => clearInterval(t); }, []);
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
   }, [chat]);
@@ -36,21 +41,30 @@ export default function App() {
     const last = events[events.length - 1];
     if (last.channel === 'action' && last.type === 'pending') refreshPending();
     if (last.channel === 'upgrade')                          refreshVersions();
+    if (last.channel === 'intent' && last.type === 'predicted') setLastIntent(last);
   }, [events]);
 
   async function refreshAll() {
     try {
-      const [h, m, mem, p, v, vs, mo] = await Promise.all([
+      const [h, m, mem, p, v, vs, mo, cs, lr, vsz] = await Promise.all([
         api.health(), api.getMode(), api.listMemories(),
         api.pendingPermissions(), api.upgradeVersions(),
         api.voiceState(), api.models(),
+        api.cacheStats(), api.learning(), api.vectorSize(),
       ]);
       setHealth(h); setMode(m.mode);
       setMemories(mem.memories); setPending(p.pending);
       setVersions(v.versions); setVoice(vs); setModels(mo);
+      setCacheStats(cs); setLearning(lr); setVectorSize(vsz.size);
     } catch (e) { console.error(e); }
   }
 
+  async function refreshTelemetry() {
+    try {
+      const [cs, lr, vsz] = await Promise.all([api.cacheStats(), api.learning(), api.vectorSize()]);
+      setCacheStats(cs); setLearning(lr); setVectorSize(vsz.size);
+    } catch {}
+  }
   async function refreshPending() { try { setPending((await api.pendingPermissions()).pending); } catch {} }
   async function refreshVersions() { try { setVersions((await api.upgradeVersions()).versions); } catch {} }
   async function refreshMemories() { try { setMemories((await api.listMemories()).memories); } catch {} }
@@ -61,10 +75,25 @@ export default function App() {
     setInput('');
     setBusy(true);
     setChat((c) => [...c, { role: 'user', content: text }]);
+    const i = chat.length + 1; // index of the assistant slot we'll fill
     try {
-      const r = await api.chat('default', text);
-      setChat((c) => [...c, { role: 'assistant', content: r.reply, plan: r.plan }]);
-      if (r.upgrade)       refreshVersions();
+      if (streaming) {
+        setChat((c) => [...c, { role: 'assistant', content: '' }]);
+        await streamChat('default', text, (ev) => {
+          if (ev.event === 'token' && ev.delta) {
+            setChat((c) => {
+              const next = [...c];
+              if (next[i]) next[i] = { ...next[i], content: (next[i].content || '') + ev.delta };
+              return next;
+            });
+          }
+          if (ev.event === 'intent') setLastIntent({ ...ev.data, ts: Date.now() });
+        });
+      } else {
+        const r = await api.chat('default', text);
+        setChat((c) => [...c, { role: 'assistant', content: r.reply, plan: r.plan, intent: r.intent, strategy: r.strategy }]);
+        if (r.upgrade) refreshVersions();
+      }
       if (text.startsWith('remember') || text.startsWith('forget')) refreshMemories();
     } catch (e) {
       setChat((c) => [...c, { role: 'system', content: `Error: ${e.message}` }]);
@@ -108,6 +137,12 @@ export default function App() {
     return s;
   }, [events]);
 
+  const cacheHitRate = useMemo(() => {
+    const total = (cacheStats.exact_hits || 0) + (cacheStats.semantic_hits || 0) + (cacheStats.misses || 0);
+    if (!total) return 0;
+    return ((cacheStats.exact_hits + cacheStats.semantic_hits) / total) * 100;
+  }, [cacheStats]);
+
   return (
     <div className="app">
       <div className="topbar">
@@ -117,7 +152,13 @@ export default function App() {
           NVIDIA NIM {health?.nvidia_configured ? '●' : '○'}
         </div>
         <div className="status-pill">{mode.replace('_', ' ').toUpperCase()}</div>
+        <div className="status-pill">CACHE {cacheHitRate.toFixed(0)}%</div>
+        <div className="status-pill">VEC {vectorSize}</div>
         <div className="spacer" />
+        <label style={{ fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="checkbox" checked={streaming} onChange={(e) => setStreaming(e.target.checked)} />
+          STREAM
+        </label>
         <button
           className={`voice-btn ${voice.active ? 'active' : ''}`}
           title="Toggle JARVIS voice mode"
@@ -136,6 +177,17 @@ export default function App() {
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="panel">
+          <h3>Last Intent</h3>
+          {lastIntent ? (
+            <div style={{ fontSize: 11, lineHeight: 1.6 }}>
+              <div><span style={{ color: 'var(--accent-2)' }}>{lastIntent.intent}</span> · {(lastIntent.confidence * 100).toFixed(0)}%</div>
+              <div style={{ color: 'var(--text-dim)' }}>strategy: {lastIntent.strategy}</div>
+              {lastIntent.skill && <div style={{ color: 'var(--text-dim)' }}>skill: {lastIntent.skill}</div>}
+            </div>
+          ) : <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>—</div>}
         </div>
 
         <div className="panel">
@@ -179,17 +231,17 @@ export default function App() {
         <div className="chat-log" ref={chatRef}>
           {chat.length === 0 && (
             <div className="msg system">
-              JARVIS online. Powered by NVIDIA NIM.<br/>
-              Try: <em>"remember this: I prefer concise answers"</em>, <em>"list files in ~/"</em>, or <em>"upgrade myself"</em>.
+              JARVIS online. NVIDIA NIM + cache + vector memory + deep search.<br/>
+              Try: <em>"deep research recent NVIDIA NIM models"</em>, <em>"remember this: I prefer concise answers"</em>, or <em>"upgrade myself"</em>.
             </div>
           )}
           {chat.map((m, i) => (
             <div key={i} className={`msg ${m.role}`}>
-              <div className="meta">{m.role}</div>
+              <div className="meta">{m.role}{m.intent ? ` · ${m.strategy || m.intent.intent}` : ''}</div>
               <div>{m.content}</div>
             </div>
           ))}
-          {busy && <div className="msg system">Thinking...</div>}
+          {busy && !streaming && <div className="msg system">Thinking...</div>}
         </div>
 
         <div className="composer">
@@ -222,8 +274,27 @@ export default function App() {
         </div>
 
         <div className="panel">
+          <h3>Cache</h3>
+          <div className="kv">
+            <div><span>exact hits</span><b>{cacheStats.exact_hits || 0}</b></div>
+            <div><span>semantic hits</span><b>{cacheStats.semantic_hits || 0}</b></div>
+            <div><span>misses</span><b>{cacheStats.misses || 0}</b></div>
+            <div><span>writes</span><b>{cacheStats.writes || 0}</b></div>
+            <div><span>hit rate</span><b style={{ color: 'var(--ok)' }}>{cacheHitRate.toFixed(1)}%</b></div>
+          </div>
+        </div>
+
+        <div className="panel">
+          <h3>Learning</h3>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{learning.samples || 0} samples</div>
+          {Object.entries(learning.skill_weights || {}).slice(0, 6).map(([k, v]) => (
+            <div key={k} className="kv-row"><span>{k}</span><b>{Number(v).toFixed(2)}</b></div>
+          ))}
+        </div>
+
+        <div className="panel">
           <h3>NVIDIA Models</h3>
-          {Object.values(models.registry || {}).map((m) => (
+          {Object.values(models.registry || {}).slice(0, 8).map((m) => (
             <div key={m.id} className="model-row">
               <div className="id">{m.id}</div>
               <div className="tier">{m.tier} · {(m.context_window / 1000).toFixed(0)}K</div>
@@ -238,7 +309,7 @@ export default function App() {
               <div key={i} className="line">
                 <span className="ch">[{e.channel}]</span>{' '}
                 <span className="t">{e.type}</span>{' '}
-                {e.content || e.desc || e.delta || e.text || e.kind || ''}
+                {e.content || e.desc || e.delta || e.text || e.kind || e.intent || ''}
               </div>
             ))}
           </div>

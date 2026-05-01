@@ -296,6 +296,13 @@ input:focus, textarea:focus { border-color: var(--accent-2); }
   animation: pulse 1.2s infinite;
 }
 
+/* kv blocks */
+.kv { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
+.kv > div { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px dashed rgba(29,44,58,0.4); }
+.kv > div span { color: var(--text-dim); }
+.kv-row { display: flex; justify-content: space-between; font-size: 10px; padding: 2px 0; }
+.kv-row span { color: var(--text-dim); }
+
 /* model registry */
 .model-row {
   font-size: 10px;

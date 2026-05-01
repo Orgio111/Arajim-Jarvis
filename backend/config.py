@@ -40,6 +40,37 @@ class Settings(BaseSettings):
     nim_model_long_context: str = Field(
         default="moonshotai/kimi-k2.5", alias="NIM_MODEL_LONG_CONTEXT"
     )
+    nim_embedding_model: str = Field(
+        default="nvidia/llama-3.2-nv-embedqa-1b-v2", alias="NIM_EMBEDDING_MODEL"
+    )
+
+    # Auto discovery / parallel
+    nim_auto_discover: bool = Field(default=True, alias="NIM_AUTO_DISCOVER")
+    nim_parallel_race: bool = Field(default=False, alias="NIM_PARALLEL_RACE")
+
+    # Cache
+    cache_backend: str = Field(default="memory", alias="CACHE_BACKEND")
+    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    cache_exact_ttl: int = Field(default=3600, alias="CACHE_EXACT_TTL")
+    cache_semantic_ttl: int = Field(default=7200, alias="CACHE_SEMANTIC_TTL")
+    cache_semantic_threshold: float = Field(default=0.92, alias="CACHE_SEMANTIC_THRESHOLD")
+
+    # Vector memory
+    vector_backend: str = Field(default="numpy", alias="VECTOR_BACKEND")
+    vector_dim: int = Field(default=1024, alias="VECTOR_DIM")
+    vector_db_path: str = Field(default="./data/vectors.npz", alias="VECTOR_DB_PATH")
+    summarize_after: int = Field(default=40, alias="SUMMARIZE_AFTER")
+
+    # Search
+    search_enabled: bool = Field(default=True, alias="SEARCH_ENABLED")
+    search_backend: str = Field(default="duckduckgo", alias="SEARCH_BACKEND")
+    tavily_api_key: str = Field(default="", alias="TAVILY_API_KEY")
+    serper_api_key: str = Field(default="", alias="SERPER_API_KEY")
+    deep_search_max_steps: int = Field(default=4, alias="DEEP_SEARCH_MAX_STEPS")
+
+    # Learning
+    passive_learning: bool = Field(default=True, alias="PASSIVE_LEARNING")
+    learning_decay: float = Field(default=0.9, alias="LEARNING_DECAY")
 
     # Server
     backend_host: str = Field(default="0.0.0.0", alias="BACKEND_HOST")

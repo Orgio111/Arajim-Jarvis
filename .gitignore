@@ -1,0 +1,29 @@
+# env
+.env
+.env.local
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# node
+node_modules/
+dist/
+.vite/
+
+# data
+data/
+logs/
+versions/v*/snapshot/
+*.db
+*.sqlite
+
+# os
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,249 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { api } from './api.js';
+import { useWebSocket } from './useWebSocket.js';
+
+const MODES = [
+  { id: 'full_auto',    label: 'AUTO' },
+  { id: 'smart_assist', label: 'ASSIST' },
+  { id: 'manual',       label: 'MANUAL' },
+];
+
+const AGENTS = ['planner', 'executor', 'coder', 'reviewer', 'optimizer'];
+
+export default function App() {
+  const { events, connected } = useWebSocket('/ws');
+  const [health, setHealth] = useState(null);
+  const [mode, setMode] = useState('smart_assist');
+  const [chat, setChat] = useState([]);
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [memories, setMemories] = useState([]);
+  const [pending, setPending] = useState([]);
+  const [versions, setVersions] = useState([]);
+  const [voice, setVoice] = useState({ enabled: false, active: false, lang: 'en' });
+  const [models, setModels] = useState({ registry: {}, scores: {} });
+
+  const chatRef = useRef(null);
+
+  useEffect(() => { refreshAll(); }, []);
+  useEffect(() => {
+    chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+  }, [chat]);
+
+  // React to live events
+  useEffect(() => {
+    if (!events.length) return;
+    const last = events[events.length - 1];
+    if (last.channel === 'action' && last.type === 'pending') refreshPending();
+    if (last.channel === 'upgrade')                          refreshVersions();
+  }, [events]);
+
+  async function refreshAll() {
+    try {
+      const [h, m, mem, p, v, vs, mo] = await Promise.all([
+        api.health(), api.getMode(), api.listMemories(),
+        api.pendingPermissions(), api.upgradeVersions(),
+        api.voiceState(), api.models(),
+      ]);
+      setHealth(h); setMode(m.mode);
+      setMemories(mem.memories); setPending(p.pending);
+      setVersions(v.versions); setVoice(vs); setModels(mo);
+    } catch (e) { console.error(e); }
+  }
+
+  async function refreshPending() { try { setPending((await api.pendingPermissions()).pending); } catch {} }
+  async function refreshVersions() { try { setVersions((await api.upgradeVersions()).versions); } catch {} }
+  async function refreshMemories() { try { setMemories((await api.listMemories()).memories); } catch {} }
+
+  async function send() {
+    const text = input.trim();
+    if (!text || busy) return;
+    setInput('');
+    setBusy(true);
+    setChat((c) => [...c, { role: 'user', content: text }]);
+    try {
+      const r = await api.chat('default', text);
+      setChat((c) => [...c, { role: 'assistant', content: r.reply, plan: r.plan }]);
+      if (r.upgrade)       refreshVersions();
+      if (text.startsWith('remember') || text.startsWith('forget')) refreshMemories();
+    } catch (e) {
+      setChat((c) => [...c, { role: 'system', content: `Error: ${e.message}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeMode(m) { setMode((await api.setMode(m)).mode); }
+  async function approve(id) { await api.approve(id); refreshPending(); }
+  async function deny(id)    { await api.deny(id);    refreshPending(); }
+  async function forget(id)  { await api.deleteMemory(id); refreshMemories(); }
+  async function toggleVoice() { setVoice((await api.voiceToggle()).active ? { ...voice, active: true } : { ...voice, active: false }); }
+
+  async function triggerUpgrade() {
+    const phrase = window.prompt(`Type the confirmation phrase to upgrade myself:`, '');
+    if (!phrase) return;
+    setChat((c) => [...c, { role: 'system', content: `Upgrade requested: ${phrase}` }]);
+    try {
+      const r = await api.upgrade(phrase);
+      setChat((c) => [...c, { role: 'system', content: `Upgrade applied: v${r.version} — ${r.summary}` }]);
+      refreshVersions();
+    } catch (e) {
+      setChat((c) => [...c, { role: 'system', content: `Upgrade failed: ${e.message}` }]);
+    }
+  }
+
+  async function rollback(v) {
+    if (!confirm(`Rollback to v${v}?`)) return;
+    try { await api.rollback(v); refreshVersions(); } catch (e) { alert(e.message); }
+  }
+
+  // derive agent activity from events
+  const agentState = useMemo(() => {
+    const s = Object.fromEntries(AGENTS.map((a) => [a, 'idle']));
+    for (let i = events.length - 1; i >= Math.max(0, events.length - 40); i--) {
+      const e = events[i];
+      if (e.channel === 'agent' && e.type === 'thinking' && s[e.agent] === 'idle') s[e.agent] = 'thinking';
+      if (e.channel === 'agent' && e.type === 'reply' && s[e.agent] === 'thinking') s[e.agent] = 'done';
+    }
+    return s;
+  }, [events]);
+
+  return (
+    <div className="app">
+      <div className="topbar">
+        <div className="brand">ARAJIM-JARVIS<span className="v">v{health?.version || 1}</span></div>
+        <div className={`status-pill ${connected ? 'ok' : 'bad'}`}>{connected ? 'LINK ●' : 'OFFLINE'}</div>
+        <div className={`status-pill ${health?.nvidia_configured ? 'ok' : 'warn'}`}>
+          NVIDIA NIM {health?.nvidia_configured ? '●' : '○'}
+        </div>
+        <div className="status-pill">{mode.replace('_', ' ').toUpperCase()}</div>
+        <div className="spacer" />
+        <button
+          className={`voice-btn ${voice.active ? 'active' : ''}`}
+          title="Toggle JARVIS voice mode"
+          onClick={toggleVoice}
+        >🎙</button>
+        <button className="primary" onClick={triggerUpgrade}>UPGRADE MYSELF</button>
+      </div>
+
+      <aside className="sidebar">
+        <div className="panel">
+          <h3>Mode</h3>
+          <div className="mode-row">
+            {MODES.map((m) => (
+              <button key={m.id} className={mode === m.id ? 'active' : ''} onClick={() => changeMode(m.id)}>
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <h3>Agents</h3>
+          {AGENTS.map((a) => (
+            <div key={a} className="agent-row">
+              <span className="agent-name">{a}</span>
+              <span className={`agent-state ${agentState[a]}`}>{agentState[a]}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="panel">
+          <h3>Pending Actions</h3>
+          {pending.length === 0 && <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>No pending actions.</div>}
+          {pending.map((p) => (
+            <div key={p.id} className="confirm-card">
+              <div className="desc">[{p.kind}] {p.description}</div>
+              <div className="actions">
+                <button onClick={() => approve(p.id)}>Approve</button>
+                <button className="danger" onClick={() => deny(p.id)}>Deny</button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="panel">
+          <h3>Memory</h3>
+          {memories.length === 0 && <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>Empty. Say "remember this: ..."</div>}
+          {memories.slice(0, 30).map((m) => (
+            <div key={m.id} className="mem-row">
+              <span className="id">#{m.id}</span>
+              <span>{m.content}</span>
+              <span className="x" onClick={() => forget(m.id)}>✕</span>
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      <main className="main">
+        <div className="chat-log" ref={chatRef}>
+          {chat.length === 0 && (
+            <div className="msg system">
+              JARVIS online. Powered by NVIDIA NIM.<br/>
+              Try: <em>"remember this: I prefer concise answers"</em>, <em>"list files in ~/"</em>, or <em>"upgrade myself"</em>.
+            </div>
+          )}
+          {chat.map((m, i) => (
+            <div key={i} className={`msg ${m.role}`}>
+              <div className="meta">{m.role}</div>
+              <div>{m.content}</div>
+            </div>
+          ))}
+          {busy && <div className="msg system">Thinking...</div>}
+        </div>
+
+        <div className="composer">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+            placeholder="Talk to JARVIS..."
+          />
+          <button className="primary" onClick={send} disabled={busy}>Send</button>
+        </div>
+      </main>
+
+      <aside className="rightbar">
+        <div className="panel upgrade-panel">
+          <h3>Versions</h3>
+          <div className="version-list">
+            {versions.length === 0 && <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>No versions yet.</div>}
+            {versions.slice().reverse().map((v) => (
+              <div key={v.version} className={`version-row ${v.status}`}>
+                <span>v{v.version}</span>
+                <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>{v.summary || '—'}</span>
+                <span className="badge">{v.status}</span>
+                {v.status === 'applied' && v.version > 1 && (
+                  <button style={{ padding: '2px 6px', fontSize: 9 }} onClick={() => rollback(v.version - 1)}>↩</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <h3>NVIDIA Models</h3>
+          {Object.values(models.registry || {}).map((m) => (
+            <div key={m.id} className="model-row">
+              <div className="id">{m.id}</div>
+              <div className="tier">{m.tier} · {(m.context_window / 1000).toFixed(0)}K</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="panel">
+          <h3>Live Stream</h3>
+          <div className="log-stream">
+            {events.slice(-80).reverse().map((e, i) => (
+              <div key={i} className="line">
+                <span className="ch">[{e.channel}]</span>{' '}
+                <span className="t">{e.type}</span>{' '}
+                {e.content || e.desc || e.delta || e.text || e.kind || ''}
+              </div>
+            ))}
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
